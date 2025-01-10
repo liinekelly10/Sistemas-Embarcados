@@ -1,66 +1,148 @@
 #include "FreeRTOS.h"
 #include "task.h"
-#include "stdio.h"
+#include "queue.h"
+#include "semphr.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 
-// Task handles for task management
-TaskHandle_t Task1_Handle;
-TaskHandle_t Task2_Handle;
-TaskHandle_t Task3_Handle;
-TaskHandle_t Task4_Handle;
-TaskHandle_t Task5_Handle;
+// Configurações globais
+#define HISTORY_SIZE 10
 
-// Function that represents the first task
-void Task1(void *pvParameters) {
-    for (;;) {
-        printf("Task 1 is running...\n");
-        vTaskDelay(1000 / portTICK_PERIOD_MS); // Delay for 1 second
+// Handles para tarefas e recursos
+TaskHandle_t producerTaskHandle, consumerTaskHandle, monitorTaskHandle, controlTaskHandle;
+QueueHandle_t numberQueue;
+SemaphoreHandle_t printSemaphore;
+int history[HISTORY_SIZE];
+int historyIndex = 0;
+
+// Função da tarefa produtora
+void producerTask(void *pvParameters) {
+    srand(time(NULL));
+    while (1) {
+        int randomNum = rand() % 100;
+        xQueueSend(numberQueue, &randomNum, portMAX_DELAY);
+        xSemaphoreTake(printSemaphore, portMAX_DELAY);
+        printf("Produzido: %d\n", randomNum);
+        xSemaphoreGive(printSemaphore);
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 1 segundo
     }
 }
 
-// Function that represents the second task
-void Task2(void *pvParameters) {
-    for (;;) {
-        printf("Task 2 is running...\n");
-        vTaskDelay(2000 / portTICK_PERIOD_MS); // Delay for 2 seconds
+// Função da tarefa consumidora
+void consumerTask(void *pvParameters) {
+    int receivedNum;
+    while (1) {
+        if (xQueueReceive(numberQueue, &receivedNum, portMAX_DELAY)) {
+            xSemaphoreTake(printSemaphore, portMAX_DELAY);
+            printf("Consumido: %d, quadrado: %d\n", receivedNum, receivedNum * receivedNum);
+            xSemaphoreGive(printSemaphore);
+        }
     }
 }
 
-// Function that represents the third task
-void Task3(void *pvParameters) {
-    for (;;) {
-        printf("Task 3 is monitoring...\n");
-        vTaskDelay(1500 / portTICK_PERIOD_MS); // Delay for 1.5 seconds
+// Função da tarefa de monitoramento
+void monitorTask(void *pvParameters) {
+    while (1) {
+        UBaseType_t freeHeap = xPortGetFreeHeapSize();
+        xSemaphoreTake(printSemaphore, portMAX_DELAY);
+        printf("Monitoramento: Heap livre: %lu bytes\n", freeHeap);
+        xSemaphoreGive(printSemaphore);
+        vTaskDelay(pdMS_TO_TICKS(2000)); // 2 segundos
     }
 }
 
-// Function that represents the fourth task
-void Task4(void *pvParameters) {
-    for (;;) {
-        printf("Task 4 is executing a periodic check...\n");
-        vTaskDelay(2500 / portTICK_PERIOD_MS); // Delay for 2.5 seconds
+// Função da tarefa de controle
+void controlTask(void *pvParameters) {
+    while (1) {
+        UBaseType_t producerPriority = uxTaskPriorityGet(producerTaskHandle);
+        if (producerPriority < tskIDLE_PRIORITY + 2) {
+            vTaskPrioritySet(producerTaskHandle, producerPriority + 1);
+        }
+        xSemaphoreTake(printSemaphore, portMAX_DELAY);
+        printf("Controle: Aumentando prioridade do produtor para %lu\n", producerPriority + 1);
+        xSemaphoreGive(printSemaphore);
+        vTaskDelay(pdMS_TO_TICKS(5000)); // 5 segundos
     }
 }
 
-// Function that represents the fifth task
-void Task5(void *pvParameters) {
-    for (;;) {
-        printf("Task 5 is performing cleanup...\n");
-        vTaskDelay(3000 / portTICK_PERIOD_MS); // Delay for 3 seconds
+// Função da tarefa de simulação de sensor
+void sensorTask(void *pvParameters) {
+    while (1) {
+        int temperature = (rand() % 30) + 20; // Simula temperaturas entre 20 e 50 graus
+        xQueueSend(numberQueue, &temperature, portMAX_DELAY);
+        xSemaphoreTake(printSemaphore, portMAX_DELAY);
+        printf("Sensor: Temperatura enviada %d°C\n", temperature);
+        xSemaphoreGive(printSemaphore);
+        vTaskDelay(pdMS_TO_TICKS(1500)); // 1,5 segundos
+    }
+}
+
+// Função da tarefa de registro histórico
+void historyTask(void *pvParameters) {
+    int processedValue;
+    while (1) {
+        if (xQueueReceive(numberQueue, &processedValue, portMAX_DELAY)) {
+            history[historyIndex] = processedValue;
+            historyIndex = (historyIndex + 1) % HISTORY_SIZE; // Ciclo circular
+            xSemaphoreTake(printSemaphore, portMAX_DELAY);
+            printf("Histórico: Valor %d adicionado ao histórico\n", processedValue);
+            xSemaphoreGive(printSemaphore);
+        }
+        vTaskDelay(pdMS_TO_TICKS(500)); // Processa rapidamente
+    }
+}
+
+// Função da tarefa de alarme
+void alarmTask(void *pvParameters) {
+    int receivedValue;
+    const int threshold = 40;
+    while (1) {
+        if (xQueueReceive(numberQueue, &receivedValue, portMAX_DELAY)) {
+            if (receivedValue > threshold) {
+                xSemaphoreTake(printSemaphore, portMAX_DELAY);
+                printf("Alarme: Valor crítico detectado %d! (limite: %d)\n", receivedValue, threshold);
+                xSemaphoreGive(printSemaphore);
+            }
+        }
+    }
+}
+
+// Função da tarefa de relatório
+void reportTask(void *pvParameters) {
+    while (1) {
+        xSemaphoreTake(printSemaphore, portMAX_DELAY);
+        printf("Relatório: Histórico de valores armazenados:\n");
+        for (int i = 0; i < HISTORY_SIZE; i++) {
+            printf("[%d]: %d\n", i, history[i]);
+        }
+        xSemaphoreGive(printSemaphore);
+        vTaskDelay(pdMS_TO_TICKS(10000)); // A cada 10 segundos
     }
 }
 
 int main(void) {
-    // Initialize the FreeRTOS kernel
-    xTaskCreate(Task1, "Task1", configMINIMAL_STACK_SIZE, NULL, 1, &Task1_Handle);
-    xTaskCreate(Task2, "Task2", configMINIMAL_STACK_SIZE, NULL, 1, &Task2_Handle);
-    xTaskCreate(Task3, "Task3", configMINIMAL_STACK_SIZE, NULL, 1, &Task3_Handle);
-    xTaskCreate(Task4, "Task4", configMINIMAL_STACK_SIZE, NULL, 1, &Task4_Handle);
-    xTaskCreate(Task5, "Task5", configMINIMAL_STACK_SIZE, NULL, 1, &Task5_Handle);
+    // Inicialização de recursos
+    numberQueue = xQueueCreate(10, sizeof(int));
+    printSemaphore = xSemaphoreCreateMutex();
 
-    // Start the FreeRTOS scheduler
+    // Criação das tarefas originais
+    xTaskCreate(producerTask, "Producer", 1000, NULL, 1, &producerTaskHandle);
+    xTaskCreate(consumerTask, "Consumer", 1000, NULL, 1, &consumerTaskHandle);
+    xTaskCreate(monitorTask, "Monitor", 1000, NULL, 1, &monitorTaskHandle);
+    xTaskCreate(controlTask, "Control", 1000, NULL, 2, &controlTaskHandle);
+
+    // Criação das novas tarefas
+    xTaskCreate(sensorTask, "Sensor", 1000, NULL, 1, NULL);
+    xTaskCreate(historyTask, "History", 1000, NULL, 1, NULL);
+    xTaskCreate(alarmTask, "Alarm", 1000, NULL, 1, NULL);
+    xTaskCreate(reportTask, "Report", 1000, NULL, 1, NULL);
+
+    // Inicialização do scheduler
     vTaskStartScheduler();
 
-    // If all is well, this line will never be reached
-    for (;;);
+    // Código não deve chegar aqui
+    while (1);
     return 0;
 }
+
